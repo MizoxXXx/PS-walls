@@ -48,13 +48,6 @@ Building this wrapper required solving several non-trivial engineering challenge
 - **`Race Condition Mitigation`**: Refined synchronization for secure output buffer access.
 - **`Session Containment`**: Blocked environment escapes via process monitoring.
 
-- **`Sentinel Sync:`** Resolved asynchronous output "jumping" by injecting hidden signatures after commands, ensuring the prompt only returns after the output is fully piped.
-- **`Low-Level Interception:`** Used `_getch` for custom buffer management, allowing input obfuscation without losing tab-completion or command history.
-- **`ANSI Preservation:`** Implemented a filtering algorithm to bypass VT100 escape sequences, maintaining PowerShell’s native colors and table layouts.
-- **`DPAPI & Memory Security:`** Integrated **Windows DPAPI** and `SecureZeroMemory` to bind encryption to user hardware and prevent data theft via memory dumps or file cloning.
-- **`Thread Orchestration:`** Eliminated deadlocks through recursive thread refactoring, keeping UI and logging services non-blocking.
-- **`Race Condition Mitigation:`** Refined synchronization logic to ensure security rules are applied to the output buffer before it reaches the user.
-- **`Session Containment:`** Blocked "environment escapes" via process monitoring and window enforcement, forcing new PowerShell instances into secured wrappers.
 
 ---
 
@@ -114,3 +107,4 @@ So , **PS~walls** is a living project with several planned enhancements:
 - 📊 **Analytics & Visualization**: Improving log visualization across different software and platforms and add new filters and be readable by different log readers
 
 - 🗿 Better teamwork with powershell logic especially with future updates
+
