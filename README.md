@@ -95,6 +95,6 @@ So , **PS~walls** is a living project with several planned enhancements:
 
 - ⚔️ **Advanced Hardening**: Strengthening the core engine against sophisticated anti-debugging and process-injection techniques used by expert attackers.
 - 🎭 **Stealth Obfuscation**: Refining the masking logic to be more seamless and visually undetectable to the casual eye.
-- 🖥️ **Enhanced Intelligence**: Expanding the threat signature database and implementing "nice_errors" for clearer context-aware even with spelling mistakes … , security alerts , new command/features/experience or lacking ones that exists in Linux but not in Windows terminal like `file` ; `ctrl + L` …
+- 🖥️ **Enhanced Intelligence**: Expanding the threat signature database and implementing "nice_errors" for clearer context-aware even with spelling mistakes … , security alerts , shortcuts ,new command/features/experience or lacking ones that exists in Linux but not in Windows terminal like `file` ; `ctrl + L` …
 - 📊 **Analytics & Visualization**: Improving log visualization across different software and platforms and add new filters and be readable by different log readers
 - 🗿 Better teamwork with powershell logic especially with future updates
