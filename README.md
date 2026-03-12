@@ -162,11 +162,5 @@ This project is licensed under the **MIT License**. You are free to use, modify,
 
 For the full license text, please refer to the [LICENSE](LICENSE) file in this repository.
 
-**MIT License Summary:**
-- ✅ You can use this software for any purpose
-- ✅ You can modify and distribute the code
-- ✅ You must include the original license and copyright notice
-- ❌ The software is provided "as-is" without warranty
-
-
 ---
+
