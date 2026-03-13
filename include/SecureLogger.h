@@ -53,6 +53,7 @@ public:
     bool RotateLogs(const std::string& rotationType = "logs");  // "logs" or "keys"
     size_t GetLogCount() const;
     size_t CountFlaggedEntries() const;
+    void RefreshLogs();
     void SetAuthManager(AuthenticationManager* auth);
     const std::vector<CommandLogEntry>& GetEntries() const { return m_entries; }
     std::string GetSessionId() const { return m_sessionId; }
@@ -64,9 +65,9 @@ private:
     bool m_encryptLogs;
     size_t m_maxEntries = 1000;
     std::string m_logFilePath;
-    std::ofstream m_logFile;
     mutable std::recursive_mutex m_mutex;
     std::vector<CommandLogEntry> m_entries;
+    std::vector<CommandLogEntry> m_pendingEntries; // Unsaved entries for this session
     AuthenticationManager* m_auth = nullptr;
     std::string m_sessionId;  // Unique per-session identifier
 
@@ -88,4 +89,8 @@ private:
     void ArchiveLogFile(const std::string& archiveType);  // "logs" or "keys"
     void ScheduleFileDeletion(const std::string& filepath, int delaySeconds = 300);
     std::string GetCurrentTimestamp();
+    
+    // Cross-process synchronization for multi-session support
+    HANDLE LockGlobalMutex();
+    void UnlockGlobalMutex(HANDLE hMutex);
 };
