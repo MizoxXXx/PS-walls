@@ -56,6 +56,7 @@ private:
     void AddToHistory(const std::string& cmd);
     std::string Trim(const std::string& s);
     std::string SanitizeOutput(const std::string& s);
+    std::string GetCurrentPrompt() const;
 
 private:
     std::atomic<bool> m_shouldExit{false};
