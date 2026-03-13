@@ -157,12 +157,13 @@ So , **PS~walls** is a living project with several planned enhancements:
 
 ## 📜 License
 
-**Copyright © 2025 Hamza Bouaallak**
+**Copyright © 2026 Hamza Bouaallak**
 
 This project is licensed under the **MIT License**. You are free to use, modify, and distribute this software, provided that you include the original license and copyright notice.
 
 For the full license text, please refer to the [LICENSE](LICENSE) file in this repository.
 
 ---
+
 
 
