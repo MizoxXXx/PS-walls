@@ -565,12 +565,12 @@ std::string PowerShellWrapper::ReadInputWithHistory() {
                     
                     // Clear the line cleanly using carriage return and clearing
                     std::cout << "\r";
-                    std::cout << ANSI_BLUE << "PS~walls> " << ANSI_RESET;
+                    std::cout << ANSI_BLUE << GetCurrentPrompt() << ANSI_RESET;
                     std::cout << buffer;
                     
                     // Clear any remaining characters from old display
-                    std::cout << "                                                                    ";  // Extra spaces to clear trailing chars
-                    std::cout << "\r" << ANSI_BLUE << "PS~walls> " << ANSI_RESET << buffer;
+                    std::cout << "                                                                    ";  
+                    std::cout << "\r" << ANSI_BLUE << GetCurrentPrompt() << ANSI_RESET << buffer;
                     std::cout.flush();
                 } else if (nextCh == 80) { // DOWN
                     if (historyIndex == -1) continue;
@@ -587,12 +587,12 @@ std::string PowerShellWrapper::ReadInputWithHistory() {
                     
                     // Clear the line cleanly using carriage return and clearing
                     std::cout << "\r";
-                    std::cout << ANSI_BLUE << "PS~walls> " << ANSI_RESET;
+                    std::cout << ANSI_BLUE << GetCurrentPrompt() << ANSI_RESET;
                     std::cout << buffer;
                     
                     // Clear any remaining characters from old display
-                    std::cout << "                                                                    ";  // Extra spaces to clear trailing chars
-                    std::cout << "\r" << ANSI_BLUE << "PS~walls> " << ANSI_RESET << buffer;
+                    std::cout << "                                                                    "; 
+                    std::cout << "\r" << ANSI_BLUE << GetCurrentPrompt() << ANSI_RESET << buffer;
                     std::cout.flush();
                 } 
                 // Cursor movement (standard and word-by-word)
@@ -642,8 +642,7 @@ std::string PowerShellWrapper::ReadInputWithHistory() {
         if (ch == 3) return ""; // Ctrl+C: Cancel current input line
         if (ch == 12) { // Ctrl+L 
             system("cls"); // or Clear-Host
-            std::string prompt = (m_authManager.IsAuthenticated() && !m_trackedCwd.empty()) ? "PS~walls " + m_trackedCwd + "> " : "PS~walls> ";
-            std::cout << ANSI_BLUE << prompt << ANSI_RESET << buffer;
+            std::cout << ANSI_BLUE << GetCurrentPrompt() << ANSI_RESET << buffer;
             for (size_t i = buffer.length(); i > cursorPos; i--) std::cout << "\b";
             continue;
         }
@@ -739,7 +738,7 @@ std::string PowerShellWrapper::ReadInputWithHistory() {
             }
 
             // Restore the prompt line
-            std::string prompt = (m_authManager.IsAuthenticated() && !m_trackedCwd.empty()) ? "PS~walls " + m_trackedCwd + "> " : "PS~walls> ";
+            std::string prompt = GetCurrentPrompt();
             
             // Clear the entire search display line (use wider clearance to ensure no garbage)
             std::cout << "\r";
@@ -884,18 +883,39 @@ void PowerShellWrapper::OnInactivityTimeout() {
     }
 }
 
-// prevent creds to be logged
+// prevent creds to be logged while allowing safe commands like 'pwd'
 std::string PowerShellWrapper::SanitizeForLog(const std::string& input) {
+    if (input.empty()) return "";
+    
+    std::string lowercaseLine = input;
+    std::transform(lowercaseLine.begin(), lowercaseLine.end(), lowercaseLine.begin(), ::tolower);
+    
+    // Explicitly allow standalone 'pwd' command which is safe
+    if (lowercaseLine == "pwd" || lowercaseLine.find("pwd ") == 0) {
+        return input;
+    }
+
     std::string sanitized = input;
-    std::vector<std::string> sensitiveKeywords = {"password", "pwd", "key", "token", "secret", "auth"};
+    std::vector<std::string> sensitiveKeywords = {"password", "token", "secret", "key", "auth"};
+    
     for (const auto& keyword : sensitiveKeywords) {
-        size_t pos = sanitized.find(keyword);
+        size_t pos = lowercaseLine.find(keyword);
         if (pos != std::string::npos) {
-            sanitized = sanitized.substr(0, pos + keyword.length()) + " [REDACTED]";
-            break;
+            // Check if it's likely an assignment or parameter: keyword=, keyword:, or -keyword
+            bool isAssignment = false;
+            if (pos + keyword.length() < lowercaseLine.length()) {
+                char next = lowercaseLine[pos + keyword.length()];
+                if (next == '=' || next == ':' || next == ' ') isAssignment = true;
+            }
+            
+            if (isAssignment) {
+                sanitized = sanitized.substr(0, pos + keyword.length()) + " [REDACTED]";
+                break; 
+            }
         }
     }
-    if (sanitized.length() > 200) sanitized = sanitized.substr(0, 200) + "... [TRUNCATED]"; // prevent logging long commands
+    
+    if (sanitized.length() > 200) sanitized = sanitized.substr(0, 200) + "... [TRUNCATED]";
     return sanitized;
 }
 
@@ -970,8 +990,7 @@ void PowerShellWrapper::UserInputThread() {
         if (!pendingSuggestion.empty()) {
             std::cout << ANSI_GREEN << pendingSuggestion << ANSI_RESET << "\n";
         }
-        std::string prompt = (m_authManager.IsAuthenticated() && !m_trackedCwd.empty()) ? "PS~walls " + m_trackedCwd + "> " : "PS~walls> ";
-        std::cout << ANSI_BLUE << prompt << ANSI_RESET;
+        std::cout << ANSI_BLUE << GetCurrentPrompt() << ANSI_RESET;
         std::cout.flush();
         std::string input = ReadInputWithHistory();
         m_inactivityMonitor.ResetTimer();
@@ -1352,11 +1371,15 @@ void PowerShellWrapper::SecureClearString(std::string& str) {
 
 int PowerShellWrapper::GetExponentialBackoffSeconds() const {
     // SECURITY: Exponential backoff to prevent brute force attacks
-    // Attempts:     1      2       3+
-    // Lockout(s):   60    120     240 (max)
-    if (m_failedAuthAttempts <= 1) return 60;
-    if (m_failedAuthAttempts == 2) return 120;
-    return 240;  // Cap at 4 minutes for safety
+    // Allow first 5 attempts without lockout, then progressive backoff
+    // Attempts:     1-5    6      7      8       9+
+    // Lockout(s):    0     15     30     60      120     300 (max 5min)
+    if (m_failedAuthAttempts <= 5) return 0;   // First 5 attempts free
+    if (m_failedAuthAttempts == 6) return 15;  // 15 seconds
+    if (m_failedAuthAttempts == 7) return 30;  // 30 seconds
+    if (m_failedAuthAttempts == 8) return 60;  // 1 minute
+    if (m_failedAuthAttempts == 9) return 120; // 2 minutes
+    return 300;  // Cap at 5 minutes
 }
 
 bool PowerShellWrapper::ProcessWrapperCommands(const std::string& input) {
@@ -1492,11 +1515,14 @@ bool PowerShellWrapper::ProcessWrapperCommands(const std::string& input) {
             } else {
                 SecureClearString(pwdForAuth);  // Clear on failure too
                 m_failedAuthAttempts++;
-                // SECURITY: Implement exponential backoff to prevent brute force
-                // 1st fail: 60s, 2nd: 120s, 3rd+: 240s max
+                // SECURITY: 5 free attempts, then exponential backoff starting at 15 seconds
                 int lockoutSeconds = GetExponentialBackoffSeconds();
-                m_authLockoutEnd = std::chrono::steady_clock::now() + std::chrono::seconds(lockoutSeconds);
-                std::cout << ANSI_RED << "[-] Authentication failed. Locked for " << lockoutSeconds << " seconds." << ANSI_RESET << std::endl;
+                if (lockoutSeconds > 0) {
+                    m_authLockoutEnd = std::chrono::steady_clock::now() + std::chrono::seconds(lockoutSeconds);
+                    std::cout << ANSI_RED << "[-] Authentication failed. Locked for " << lockoutSeconds << " seconds." << ANSI_RESET << std::endl;
+                } else {
+                    std::cout << ANSI_RED << "[-] Authentication failed. Attempt " << m_failedAuthAttempts << "/5" << ANSI_RESET << std::endl;
+                }
                 { std::lock_guard<std::mutex> lock(m_syncMutex); m_commandFinished = true; }
                 m_syncCv.notify_one();
             }
@@ -1626,6 +1652,7 @@ bool PowerShellWrapper::ProcessWrapperCommands(const std::string& input) {
             m_syncCv.notify_one();
             return true;
         }
+        m_logger.RefreshLogs();
         ShowHistory(); 
         { std::lock_guard<std::mutex> lock(m_syncMutex); m_commandFinished = true; }
         m_syncCv.notify_one();
@@ -1768,4 +1795,11 @@ std::string PowerShellWrapper::Trim(const std::string& s) {
     size_t a = 0; while (a < s.size() && std::isspace((unsigned char)s[a])) ++a;
     size_t b = s.size(); while (b > a && std::isspace((unsigned char)s[b-1])) --b;
     return s.substr(a, b - a);
+}
+
+std::string PowerShellWrapper::GetCurrentPrompt() const {
+    if (m_authManager.IsAuthenticated() && !m_trackedCwd.empty()) {
+        return "PS~walls " + m_trackedCwd + "> ";
+    }
+    return "PS~walls> ";
 }
