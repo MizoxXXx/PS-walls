@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(PowerShellWrapper VERSION 1.0.0 LANGUAGES CXX)
+project(PowerShellWrapper VERSION 1.0 LANGUAGES CXX)
 
 # ============================================================================
 # Configuration du projet
