@@ -43,14 +43,11 @@ void SecureLogger::Log(LogLevel level, const std::string& message, const std::st
     e.sessionId = m_sessionId;
     
     m_entries.push_back(e);
+    m_pendingEntries.push_back(e);
     if (m_entries.size() > m_maxEntries) m_entries.erase(m_entries.begin());
     
-    // Periodically save to disk to avoid excessive I/O
-    static int saveCounter = 0;
-    if (++saveCounter >= 10) {
-        SaveEntriesToFile();
-        saveCounter = 0;
-    }
+    // Save to disk IMMEDIATELY for real-time multi-session sync
+    SaveEntriesToFile();
 }
 
 void SecureLogger::LogCommand(const std::string& command, const std::string& user, const std::string& truncated, bool flagged) {
@@ -71,9 +68,9 @@ bool SecureLogger::ExportLog(const std::string& options) {
     bool useJson = (options.find("txt") == std::string::npos); // Default to JSON unless "txt" is specified
     bool showFull = (options.find("full") != std::string::npos || options.find("verbose") != std::string::npos);
     std::string ext = useJson ? ".json" : ".txt";
-    std::string exportPath = GetLogDirectory() + "\\" + "PS_Audit_" + std::to_string(std::time(nullptr)) + ext;
+    std::string exportPath = GetLogDirectory() + "\\" + "PS_Audit_" + std::to_string(std::time(nullptr)) + "_" + std::to_string(GetCurrentProcessId()) + ext;
     
-    SaveEntriesToFile();
+    RefreshLogs();
     auto filtered = FilterEntries(options);
     
     if (filtered.empty()) {
@@ -150,6 +147,7 @@ void SecureLogger::Shutdown() {
 
 void SecureLogger::ClearLog(const std::string& options) { 
     std::lock_guard<std::recursive_mutex> lock(m_mutex); 
+    RefreshLogs();
     if (options.empty()) {
         m_entries.clear();
         // Completely delete ALL log files, not just clear memory
@@ -218,6 +216,7 @@ void SecureLogger::ClearLog(const std::string& options) {
 size_t SecureLogger::GetLogCount() const { std::lock_guard<std::recursive_mutex> lock(m_mutex); return m_entries.size(); }
 
 size_t SecureLogger::CountFlaggedEntries() const { 
+    const_cast<SecureLogger*>(this)->RefreshLogs();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     return std::count_if(m_entries.begin(), m_entries.end(), [](const CommandLogEntry& e) { return e.flagged; });
 }
@@ -260,6 +259,9 @@ std::string SecureLogger::EscapeJson(const std::string& str) { return str; }
 
 void SecureLogger::ClearLogFile() {
     // Completely delete all log files (not just clear memory)
+    HANDLE hGlobalLock = LockGlobalMutex();
+    if (!hGlobalLock) return;
+
     try {
         std::string logDir = GetLogDirectory();
         std::error_code ec;
@@ -279,26 +281,46 @@ void SecureLogger::ClearLogFile() {
             }
         }
     } catch (...) {}
+    
+    UnlockGlobalMutex(hGlobalLock);
 }
 
 void SecureLogger::SaveEntriesToFile() {
     if (m_logFilePath.empty()) return;
+    
+    std::lock_guard<std::recursive_mutex> innerLock(m_mutex);
+    if (m_pendingEntries.empty()) return;
+
+    HANDLE hGlobalLock = LockGlobalMutex();
+    if (!hGlobalLock) return;
+
     try {
-        // Load existing on-disk entries first to prevent loss of data
-        // when multiple sessions write simultaneously
         nlohmann::json existing = nlohmann::json::array();
-        if (!m_encryptLogs && std::filesystem::exists(m_logFilePath)) {
-            std::ifstream fin(m_logFilePath);
-            std::string raw((std::istreambuf_iterator<char>(fin)),
-                             std::istreambuf_iterator<char>());
-            if (!raw.empty()) {
-                try { existing = nlohmann::json::parse(raw); } catch (...) {}
+        
+        if (std::filesystem::exists(m_logFilePath)) {
+            if (m_encryptLogs) {
+                std::vector<BYTE> blob;
+                if (DPAPI_ReadBinaryFile(m_logFilePath, blob)) {
+                    std::string plain = DPAPI_Unprotect(blob);
+                    if (!plain.empty()) {
+                        try { existing = nlohmann::json::parse(plain); } catch (...) {}
+                    }
+                }
+            } else {
+                std::ifstream fin(m_logFilePath);
+                if (fin.is_open()) {
+                    std::string raw((std::istreambuf_iterator<char>(fin)),
+                                     std::istreambuf_iterator<char>());
+                    if (!raw.empty()) {
+                        try { existing = nlohmann::json::parse(raw); } catch (...) {}
+                    }
+                    fin.close();
+                }
             }
         }
 
-        // Append ALL entries from this session (NO deduplication)
-        // Each execution becomes a separate log entry, even if identical
-        for (const auto& e : m_entries) {
+        // Append ONLY NEW entries from this session's pending list
+        for (const auto& e : m_pendingEntries) {
             existing.push_back({
                 {"timestamp", e.timestamp},
                 {"command",   e.command},
@@ -310,6 +332,11 @@ void SecureLogger::SaveEntriesToFile() {
                 {"sessionId", e.sessionId}
             });
         }
+        
+        // Enforce max entries on the WHOLE log file to prevent infinite growth
+        if (existing.size() > m_maxEntries * 2) { // Allow more on disk than in memory
+            existing.erase(existing.begin(), existing.end() - (m_maxEntries * 2));
+        }
 
         std::string content = existing.dump(4);
 
@@ -317,14 +344,25 @@ void SecureLogger::SaveEntriesToFile() {
             auto encrypted = DPAPI_Protect(content, L"PSWrapperLogs");
             if (!encrypted.empty()) DPAPI_WriteBinaryFile(m_logFilePath, encrypted);
         } else {
-            std::ofstream f(m_logFilePath);
-            f << content;
+            std::ofstream f(m_logFilePath, std::ios::trunc);
+            if (f.is_open()) {
+                f << content;
+                f.close();
+            }
         }
+        
+        m_pendingEntries.clear();
     } catch (...) {}
+    
+    UnlockGlobalMutex(hGlobalLock);
 }
 
 void SecureLogger::LoadEntriesFromFile() {
     if (!std::filesystem::exists(m_logFilePath)) return;
+    
+    HANDLE hGlobalLock = LockGlobalMutex();
+    if (!hGlobalLock) return;
+
     try {
         std::string content;
         if (m_encryptLogs) {
@@ -332,25 +370,59 @@ void SecureLogger::LoadEntriesFromFile() {
             if (DPAPI_ReadBinaryFile(m_logFilePath, blob)) content = DPAPI_Unprotect(blob);
         } else {
             std::ifstream f(m_logFilePath);
-            content.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (f.is_open()) {
+                content.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                f.close();
+            }
         }
         
-        if (content.empty()) return;
-        auto j = nlohmann::json::parse(content);
-        m_entries.clear();
-        for (const auto& item : j) {
-            CommandLogEntry e;
-            e.timestamp = item["timestamp"];
-            e.command = item["command"];
-            e.truncatedCommand = item.contains("truncatedCommand") ? item["truncatedCommand"].get<std::string>() : "";
-            e.user = item["user"];
-            e.flagged = item["flagged"];
-            e.severity = item["severity"];
-            e.pid = item["pid"];
-            e.sessionId = item.contains("sessionId") ? item["sessionId"].get<std::string>() : "";
-            m_entries.push_back(e);
+        if (!content.empty()) {
+            auto j = nlohmann::json::parse(content);
+            std::lock_guard<std::recursive_mutex> innerLock(m_mutex);
+            m_entries.clear();
+            for (const auto& item : j) {
+                CommandLogEntry e;
+                e.timestamp = item.value("timestamp", "");
+                e.command = item.value("command", "");
+                e.truncatedCommand = item.value("truncatedCommand", "");
+                e.user = item.value("user", "");
+                e.flagged = item.value("flagged", false);
+                e.severity = item.value("severity", "NORMAL");
+                e.pid = item.value("pid", (DWORD)0);
+                e.sessionId = item.value("sessionId", "");
+                m_entries.push_back(e);
+            }
         }
     } catch (...) {}
+    
+    UnlockGlobalMutex(hGlobalLock);
+}
+
+void SecureLogger::RefreshLogs() {
+    SaveEntriesToFile(); // Push local pending logs first so others can see them
+    LoadEntriesFromFile(); // Pull all entries from disk into m_entries
+    
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Re-apply locally pending entries if they are not already in m_entries
+    // (They might not be if they haven't been saved yet)
+    // We check against sessionId and timestamp for a loose deduplication
+    for (const auto& pending : m_pendingEntries) {
+        bool found = false;
+        // Search backwards as it's likely near the end
+        for (auto it = m_entries.rbegin(); it != m_entries.rend(); ++it) {
+            if (it->sessionId == pending.sessionId && it->timestamp == pending.timestamp && it->command == pending.command) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            m_entries.push_back(pending);
+        }
+    }
+    
+    if (m_entries.size() > m_maxEntries) {
+        m_entries.erase(m_entries.begin(), m_entries.end() - m_maxEntries);
+    }
 }
 
 std::string SecureLogger::GenerateExportFilename() {
@@ -455,6 +527,9 @@ bool SecureLogger::RotateLogs(const std::string& rotationType) {
 }
 
 void SecureLogger::ArchiveLogFile(const std::string& archiveType) {
+    HANDLE hGlobalLock = LockGlobalMutex();
+    if (!hGlobalLock) return;
+
     try {
         std::string logDir = GetLogDirectory();
         std::string archiveDir = GetArchiveDirectory();
@@ -468,9 +543,11 @@ void SecureLogger::ArchiveLogFile(const std::string& archiveType) {
                 
                 // Clear current log entries in memory and file
                 m_entries.clear();
-                SaveEntriesToFile(); // This will create an empty or minimal log file
-                
-                std::cout << ANSI_CYAN << "[*] Current log archived to: " << archivePath << ANSI_RESET << std::endl;
+                // unlock while calling SaveEntriesToFile to avoid deadlock (it will re-lock)
+                // but actually SaveEntriesToFile is called inside ArchiveLogFile?
+                // SaveEntriesToFile re-locks.
+                // It's safer to release before calling SaveEntriesToFile OR 
+                // modify SaveEntriesToFile to have a version without locking.
             }
         } else if (archiveType == "keys") {
             // Archive rotation period file if needed
@@ -483,6 +560,12 @@ void SecureLogger::ArchiveLogFile(const std::string& archiveType) {
         }
     } catch (const std::exception& ex) {
         std::cout << ANSI_RED << "[-] Archive failed: " << ex.what() << ANSI_RESET << std::endl;
+    }
+    
+    UnlockGlobalMutex(hGlobalLock);
+    
+    if (archiveType == "logs") {
+         SaveEntriesToFile(); // This recalcs the file content (now empty)
     }
 }
 
@@ -498,6 +581,32 @@ std::string SecureLogger::GetCurrentTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto in_time_t = std::chrono::system_clock::to_time_t(now);
     std::stringstream ss;
-    ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%d %H:%M:%S");
+    struct tm buf;
+    if (localtime_s(&buf, &in_time_t) == 0) {
+        ss << std::put_time(&buf, "%Y-%m-%d %H:%M:%S");
+    }
     return ss.str();
+}
+
+HANDLE SecureLogger::LockGlobalMutex() {
+    // Create a named mutex for system-wide synchronization
+    // The "Global\" prefix allows it to work across terminal sessions if needed, 
+    // but requires SeCreateGlobalPrivilege. Local\ is safer for standard users.
+    HANDLE hMutex = CreateMutexA(NULL, FALSE, "Local\\PSWrapper_Log_Mutex");
+    if (hMutex == NULL) return NULL;
+
+    DWORD waitResult = WaitForSingleObject(hMutex, 5000); // 5 second timeout
+    if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_ABANDONED) {
+        return hMutex;
+    }
+
+    CloseHandle(hMutex);
+    return NULL;
+}
+
+void SecureLogger::UnlockGlobalMutex(HANDLE hMutex) {
+    if (hMutex) {
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+    }
 }
